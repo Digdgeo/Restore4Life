@@ -23,10 +23,12 @@ Usage
 Author: Diego García Díaz
 """
 
+import base64
 import io
 import json
 import tempfile
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import ee
@@ -34,6 +36,8 @@ import geopandas as gpd
 import ipyevents
 import ipyleaflet
 import ipywidgets as widgets
+import pandas as pd
+from IPython.display import display
 
 from ndvi2gif import HydroperiodAnalyzer, NdviSeasonality
 
@@ -84,6 +88,11 @@ _VIS = {
         "palette": ["8b0000", "d73027", "fc8d59", "fee08b",
                     "ffffff",
                     "d9ef8b", "91cf60", "1a9850", "00441b"],
+    },
+    "twi": {
+        "min": 2, "max": 20,
+        "palette": ["f7fbff", "deebf7", "c6dbef", "9ecae1", "6baed6",
+                    "4292c6", "2171b5", "08519c", "08306b"],
     },
 }
 
@@ -159,6 +168,43 @@ def _read_upload(uploaded):
             return gpd.read_file(shp_files[0]).to_crs(4326), fname
     else:
         raise ValueError(f"Unsupported file type: {fname}. Use .geojson or .zip")
+
+
+def _compute_twi(roi, dem_source="MERIT"):
+    """Compute Topographic Wetness Index over an ROI.
+
+    TWI = ln(a / tan(β)), with a = upstream area per unit contour length
+    and β = local slope.
+
+    Parameters
+    ----------
+    roi : ee.Geometry
+    dem_source : {"MERIT", "HYBRID_30M"}
+        - "MERIT": MERIT Hydro v1.0.1 (~90 m) for both elevation/slope and
+          flow accumulation. Internally consistent.
+        - "HYBRID_30M": NASADEM (30 m) for elevation/slope, MERIT `upa`
+          reprojected for flow accumulation. The accumulation component
+          remains from the 90 m MERIT data — true on-the-fly sink-filling +
+          D8 routing at 30 m is not practical in GEE.
+    """
+    merit = ee.Image("MERIT/Hydro/v1_0_1")
+    upa   = merit.select("upa")  # upstream drainage area, km²
+
+    if dem_source == "HYBRID_30M":
+        elev = ee.Image("NASA/NASADEM_HGT/001").select("elevation")
+    else:
+        elev = merit.select("elv")
+
+    slope_deg = ee.Terrain.slope(elev)
+    tan_slope = slope_deg.multiply(ee.Number(3.141592653589793).divide(180)) \
+                         .tan().max(0.001)
+
+    # Specific catchment area: upa (km²) → m², divided by contour length
+    # approximated as sqrt(pixel area) at the local projection.
+    cell_width = ee.Image.pixelArea().sqrt()
+    a = upa.multiply(1e6).divide(cell_width)
+
+    return a.divide(tan_slope).log().rename("twi").clip(roi)
 
 
 # --------------------------------------------------------------------------- #
@@ -253,7 +299,7 @@ def HydroperiodApp(
     # ------------------------------------------------------------------ #
     toolbar_button = widgets.ToggleButton(
         value=False,
-        tooltip="Restore4Life Hydroperiod App",
+        tooltip="Restore4Life HydroApp",
         icon="tint",
         button_style="info",
         layout=widgets.Layout(width="28px", height="28px", padding="0px 0px 0px 4px"),
@@ -269,8 +315,18 @@ def HydroperiodApp(
     # ------------------------------------------------------------------ #
     # Controls — Hydroperiod tab                                           #
     # ------------------------------------------------------------------ #
+    logo_path = DATA_DIR / "logo.png"
+    if logo_path.exists():
+        logo_b64 = base64.b64encode(logo_path.read_bytes()).decode()
+        logo_html = (
+            f'<img src="data:image/png;base64,{logo_b64}" '
+            'style="height:20px;vertical-align:middle;margin-right:6px"/>'
+        )
+    else:
+        logo_html = "🌊 "
+
     title_html = widgets.HTML(
-        value='<b style="font-size:13px;color:#0d47a1">🌊 Restore4Life — Hydroperiod</b>',
+        value=f'<b style="font-size:13px;color:#0d47a1">{logo_html}Restore4Life — HydroApp</b>',
         layout=widgets.Layout(padding="4px 0px 6px 4px"),
     )
 
@@ -435,6 +491,107 @@ def HydroperiodApp(
         layout=widgets.Layout(width="200px", padding=PAD),
     )
 
+    # ------------------------------------------------------------------ #
+    # Controls — TWI tab                                                   #
+    # ------------------------------------------------------------------ #
+    twi_source_dd = widgets.Dropdown(
+        options=[
+            ("MERIT Hydro (~90 m, consistent)", "MERIT"),
+            ("Hybrid 30 m (NASADEM slope + MERIT acc.)", "HYBRID_30M"),
+        ],
+        value="MERIT",
+        description="DEM:",
+        layout=widgets.Layout(width=W, padding=PAD),
+        style=STYLE,
+    )
+
+    twi_run_btn = widgets.Button(
+        description="Compute TWI", button_style="success",
+        tooltip="Compute Topographic Wetness Index for current ROI",
+        layout=widgets.Layout(width="130px"),
+    )
+    twi_show_btn = widgets.Button(
+        description="Show", button_style="primary",
+        layout=widgets.Layout(width="80px"),
+    )
+    twi_export_btn = widgets.Button(
+        description="Export", button_style="warning",
+        tooltip="Export TWI to Google Drive",
+        layout=widgets.Layout(width="90px"),
+    )
+
+    twi_export_scale_w = widgets.Dropdown(
+        options=[30, 60, 90, 250, 500],
+        value=90,
+        description="Export scale (m):",
+        style=STYLE,
+        layout=widgets.Layout(width="220px", padding=PAD),
+    )
+
+    twi_output_w = widgets.Output(
+        layout=widgets.Layout(
+            width=W, padding=PAD, max_height="140px", overflow_y="auto",
+        )
+    )
+
+    # ------------------------------------------------------------------ #
+    # Controls — Stats tab                                                 #
+    # ------------------------------------------------------------------ #
+    stats_upload_w = widgets.FileUpload(
+        accept=".geojson,.json,.zip",
+        multiple=False,
+        description="Upload",
+        layout=widgets.Layout(width="140px"),
+    )
+    stats_upload_lbl = widgets.Label(
+        value="",
+        layout=widgets.Layout(width=W, padding=PAD),
+    )
+
+    stats_product_dd = widgets.Dropdown(
+        options=[
+            ("Hydroperiod (selected year + band)", "hydroperiod"),
+            ("IRT",                                 "irt"),
+            ("Mean hydroperiod (anomaly tab)",      "mean_hydroperiod"),
+            ("Anomaly (selected year)",             "anomaly"),
+            ("TWI",                                 "twi"),
+        ],
+        value="hydroperiod",
+        description="Product:",
+        layout=widgets.Layout(width=W, padding=PAD),
+        style=STYLE,
+    )
+
+    stats_scale_w = widgets.BoundedIntText(
+        value=10, min=1, max=1000,
+        description="Scale (m):",
+        style=STYLE,
+        layout=widgets.Layout(width="200px", padding=PAD),
+    )
+
+    stats_compute_btn = widgets.Button(
+        description="Compute stats", button_style="success",
+        layout=widgets.Layout(width="140px"),
+    )
+    stats_save_btn = widgets.Button(
+        description="Save CSV", button_style="primary",
+        tooltip="Write CSV locally next to the notebook",
+        layout=widgets.Layout(width="100px"),
+    )
+    stats_drive_btn = widgets.Button(
+        description="Export to Drive", button_style="warning",
+        tooltip="Server-side export (recommended for >1000 features)",
+        layout=widgets.Layout(width="150px"),
+    )
+
+    stats_output_w = widgets.Output(
+        layout=widgets.Layout(width=W, padding=PAD, max_height="120px", overflow_y="auto")
+    )
+    stats_table_w = widgets.Output(
+        layout=widgets.Layout(width=W, padding=PAD, max_height="260px",
+                              overflow_y="auto", overflow_x="auto")
+    )
+
     # Main buttons
     run_btn = widgets.Button(
         description="Compute", button_style="success",
@@ -473,6 +630,13 @@ def HydroperiodApp(
         "year_map":  {},       # "2022/2023" → 2022
         "roi":       None,
         "custom_roi": False,  # True when ROI comes from upload/draw (not wetland)
+        "twi_img":    None,
+        "twi_source": None,
+        "stats_fc":      None,    # ee.FeatureCollection
+        "stats_gdf":     None,    # local GeoDataFrame
+        "stats_geom":    None,    # "Point" or "Polygon"
+        "stats_namecol": None,
+        "stats_df":      None,    # pandas DataFrame with last results
     }
 
     # ------------------------------------------------------------------ #
@@ -739,6 +903,252 @@ def HydroperiodApp(
 
     anom_show_anom_btn.on_click(_anom_show_anom_clicked)
 
+    # -- TWI callbacks ----------------------------------------------------
+
+    def _twi_roi_label():
+        if _st["custom_roi"]:
+            return roi_lbl.value.replace("ROI: ", "").split(" (")[0] or "custom"
+        if wetland_dd.value and wetland_dd.value != "— select wetland —":
+            return wetland_dd.value
+        return "custom"
+
+    def _twi_run_clicked(b):
+        with twi_output_w:
+            twi_output_w.clear_output()
+            if _st["roi"] is None:
+                print("Select a wetland or set a custom ROI first.")
+                return
+            src = twi_source_dd.value
+            print(f"Computing TWI (source='{src}')…")
+            try:
+                img = _compute_twi(_st["roi"], dem_source=src)
+                _st["twi_img"]    = img
+                _st["twi_source"] = src
+                print("TWI ready. Click 'Show' to add it to the map.")
+            except Exception as exc:
+                print(f"Error: {exc}")
+
+    twi_run_btn.on_click(_twi_run_clicked)
+
+    def _twi_show_clicked(b):
+        with twi_output_w:
+            twi_output_w.clear_output()
+            if _st["twi_img"] is None:
+                print("Compute TWI first.")
+                return
+            layer_name = f"TWI ({_st['twi_source']}) — {_twi_roi_label()}"
+            if m is not None:
+                m.addLayer(_st["twi_img"], _VIS["twi"], layer_name)
+                print(f"Layer added: '{layer_name}'")
+
+    twi_show_btn.on_click(_twi_show_clicked)
+
+    def _twi_export_clicked(b):
+        with twi_output_w:
+            twi_output_w.clear_output()
+            if _st["twi_img"] is None:
+                print("Compute TWI first.")
+                return
+            folder = exp_folder_w.value.strip() or "restore4life_hydroperiod"
+            scale  = twi_export_scale_w.value
+            label  = _twi_roi_label().replace(" ", "_").replace("/", "-")
+            desc   = f"twi_{_st['twi_source']}_{label}"
+            try:
+                task = ee.batch.Export.image.toDrive(
+                    image=_st["twi_img"],
+                    description=desc,
+                    folder=folder,
+                    fileNamePrefix=desc,
+                    region=_st["roi"],
+                    scale=scale,
+                    maxPixels=1e13,
+                )
+                task.start()
+                print(f"Export task '{desc}' started → Drive folder '{folder}'")
+            except Exception as exc:
+                print(f"Error: {exc}")
+
+    twi_export_btn.on_click(_twi_export_clicked)
+
+    # -- Stats callbacks --------------------------------------------------
+
+    def _stats_upload_change(change):
+        val = change["new"]
+        if not val:
+            return
+        try:
+            gdf, fname = _read_upload(val)
+            gtype = str(gdf.geom_type.iloc[0])
+            if "Point" in gtype:
+                geom = "Point"
+            elif "Polygon" in gtype:
+                geom = "Polygon"
+            else:
+                raise ValueError(f"Unsupported geometry: {gtype}")
+            name_col = _detect_name_col(gdf)
+            _st["stats_gdf"]     = gdf
+            _st["stats_fc"]      = _gdf_to_ee(gdf)
+            _st["stats_geom"]    = geom
+            _st["stats_namecol"] = name_col
+            stats_upload_lbl.value = (
+                f"{fname} — {len(gdf)} {geom.lower()}(s), label col: '{name_col}'"
+            )
+        except Exception as exc:
+            stats_upload_lbl.value = f"Upload error: {exc}"
+
+    stats_upload_w.observe(_stats_upload_change, names="value")
+
+    def _stats_resolve():
+        """Resolve current product selection to (ee.Image, label)."""
+        prod = stats_product_dd.value
+        if prod == "hydroperiod":
+            if _st["cycles"] is None:
+                raise ValueError("Run 'Compute' (Hydroperiod) first.")
+            if year_dd.value is None:
+                raise ValueError("Select a hyd. year in the Hydroperiod tab.")
+            band = band_dd.value
+            if band == "irt":
+                if _st["irt_img"] is None:
+                    raise ValueError(
+                        "Click 'Show' with band='irt' first, or switch the band."
+                    )
+                return _st["irt_img"].rename("irt"), "irt"
+            yr = _st["year_map"][year_dd.value]
+            return _st["cycles"][yr].select(band).rename(band), f"{band}_{yr}_{yr+1}"
+        if prod == "irt":
+            if _st["irt_img"] is None:
+                raise ValueError("Click 'Show' with band='irt' in the Hydroperiod tab first.")
+            return _st["irt_img"].rename("irt"), "irt"
+        if prod == "mean_hydroperiod":
+            if _st["anomalies"] is None:
+                raise ValueError("Run 'Compute anomalies' first.")
+            return _st["anomalies"]["mean"].rename("mean_hydroperiod"), "mean_hydroperiod"
+        if prod == "anomaly":
+            if _st["anomalies"] is None:
+                raise ValueError("Run 'Compute anomalies' first.")
+            if anom_year_dd.value is None:
+                raise ValueError("Select a hyd. year in the Anomalies tab.")
+            yr = _st["year_map"][anom_year_dd.value]
+            return _st["anomalies"]["anomalies"][yr].rename("anomaly"), f"anomaly_{yr}_{yr+1}"
+        if prod == "twi":
+            if _st["twi_img"] is None:
+                raise ValueError("Compute TWI first.")
+            return _st["twi_img"].rename("twi"), f"twi_{_st['twi_source']}"
+        raise ValueError(f"Unknown product: {prod}")
+
+    def _stats_product_change(change):
+        prod = change["new"]
+        if prod == "twi":
+            stats_scale_w.value = 90
+        else:
+            sensor = dataset_dd.value
+            stats_scale_w.value = {"S2": 10, "Landsat": 30, "MODIS": 500}.get(sensor, 30)
+
+    stats_product_dd.observe(_stats_product_change, "value")
+
+    def _stats_reducer(geom):
+        if geom == "Point":
+            return ee.Reducer.first()
+        return (ee.Reducer.mean()
+                .combine(ee.Reducer.median(), sharedInputs=True)
+                .combine(ee.Reducer.min(),    sharedInputs=True)
+                .combine(ee.Reducer.max(),    sharedInputs=True)
+                .combine(ee.Reducer.stdDev(), sharedInputs=True)
+                .combine(ee.Reducer.count(),  sharedInputs=True))
+
+    def _stats_compute_clicked(b):
+        with stats_output_w:
+            stats_output_w.clear_output()
+            if _st["stats_fc"] is None:
+                print("Upload a shapefile / GeoJSON first.")
+                return
+            try:
+                img, label = _stats_resolve()
+            except Exception as exc:
+                print(f"Error: {exc}")
+                return
+
+            fc       = _st["stats_fc"]
+            geom     = _st["stats_geom"]
+            name_col = _st["stats_namecol"]
+            scale    = stats_scale_w.value
+            n        = len(_st["stats_gdf"])
+
+            if n > 1000:
+                print(f"{n} features — that's large for an in-browser fetch. "
+                      "Consider 'Export to Drive' instead.")
+
+            print(f"Computing {label} stats on {n} {geom.lower()}(s) at {scale} m…")
+            try:
+                result = img.reduceRegions(
+                    collection=fc,
+                    reducer=_stats_reducer(geom),
+                    scale=scale,
+                )
+                data = result.getInfo()
+                rows = []
+                for feat in data.get("features", []):
+                    props = dict(feat.get("properties", {}))
+                    props["_fid"] = feat.get("id", "")
+                    if name_col and name_col in props and "name" not in props:
+                        props["name"] = props[name_col]
+                    rows.append(props)
+                df = pd.DataFrame(rows)
+                _st["stats_df"] = df
+                print(f"Done: {len(df)} row(s), {len(df.columns)} column(s).")
+                with stats_table_w:
+                    stats_table_w.clear_output()
+                    display(df)
+            except Exception as exc:
+                print(f"Error: {exc}")
+
+    stats_compute_btn.on_click(_stats_compute_clicked)
+
+    def _stats_save_clicked(b):
+        with stats_output_w:
+            if _st["stats_df"] is None:
+                print("Compute stats first.")
+                return
+            ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = Path.cwd() / f"stats_{ts}.csv"
+            _st["stats_df"].to_csv(path, index=False)
+            print(f"Saved: {path}")
+
+    stats_save_btn.on_click(_stats_save_clicked)
+
+    def _stats_drive_clicked(b):
+        with stats_output_w:
+            stats_output_w.clear_output()
+            if _st["stats_fc"] is None:
+                print("Upload a shapefile / GeoJSON first.")
+                return
+            try:
+                img, label = _stats_resolve()
+            except Exception as exc:
+                print(f"Error: {exc}")
+                return
+            result = img.reduceRegions(
+                collection=_st["stats_fc"],
+                reducer=_stats_reducer(_st["stats_geom"]),
+                scale=stats_scale_w.value,
+            )
+            folder = exp_folder_w.value.strip() or "restore4life_hydroperiod"
+            desc   = f"stats_{label}"
+            try:
+                task = ee.batch.Export.table.toDrive(
+                    collection=result,
+                    description=desc,
+                    folder=folder,
+                    fileNamePrefix=desc,
+                    fileFormat="CSV",
+                )
+                task.start()
+                print(f"Export task '{desc}' started → Drive folder '{folder}'")
+            except Exception as exc:
+                print(f"Error: {exc}")
+
+    stats_drive_btn.on_click(_stats_drive_clicked)
+
     # -- Export callback --------------------------------------------------
 
     def _export_clicked(b):
@@ -762,7 +1172,14 @@ def HydroperiodApp(
         output_w.clear_output()
         anom_output_w.clear_output()
         _st.update(ha=None, cycles=None, anomalies=None, irt_img=None,
-                   year_map={}, roi=None, custom_roi=False)
+                   year_map={}, roi=None, custom_roi=False,
+                   twi_img=None, twi_source=None,
+                   stats_fc=None, stats_gdf=None, stats_geom=None,
+                   stats_namecol=None, stats_df=None)
+        twi_output_w.clear_output()
+        stats_output_w.clear_output()
+        stats_table_w.clear_output()
+        stats_upload_lbl.value = ""
         year_dd.options      = []
         year_dd.value        = None
         anom_year_dd.options = []
@@ -809,7 +1226,39 @@ def HydroperiodApp(
         anom_output_w,
     ])
 
-    # Tab 2 — Export
+    # Tab 2 — TWI
+    twi_tab = widgets.VBox([
+        widgets.HTML(
+            value='<small style="color:#555">Uses the ROI from the Hydroperiod tab '
+                  '(wetland / upload / draw).<br>Hybrid 30 m mixes NASADEM slope with '
+                  'MERIT flow accumulation (still ~90 m).</small>',
+            layout=widgets.Layout(padding="2px 0px 4px 4px"),
+        ),
+        twi_source_dd,
+        widgets.HBox([twi_run_btn, twi_show_btn]),
+        twi_export_scale_w,
+        twi_export_btn,
+        twi_output_w,
+    ])
+
+    # Tab 3 — Stats
+    stats_tab = widgets.VBox([
+        widgets.HTML(
+            value='<small style="color:#555">Upload points or polygons and compute '
+                  'per-feature stats over any product already computed in the other tabs.<br>'
+                  'Uses the year/band currently selected in Hydroperiod / Anomalies.</small>',
+            layout=widgets.Layout(padding="2px 0px 4px 4px"),
+        ),
+        widgets.HBox([stats_upload_w]),
+        stats_upload_lbl,
+        stats_product_dd,
+        stats_scale_w,
+        widgets.HBox([stats_compute_btn, stats_save_btn, stats_drive_btn]),
+        stats_output_w,
+        stats_table_w,
+    ])
+
+    # Tab 4 — Export
     export_tab = widgets.VBox([
         widgets.HTML(
             value='<small style="color:#555">Exports all computed hydroperiod cycles to Drive.</small>',
@@ -820,10 +1269,12 @@ def HydroperiodApp(
         export_btn,
     ])
 
-    tabs = widgets.Tab(children=[hydro_tab, anom_tab, export_tab])
+    tabs = widgets.Tab(children=[hydro_tab, anom_tab, twi_tab, stats_tab, export_tab])
     tabs.set_title(0, "Hydroperiod")
     tabs.set_title(1, "Anomalies")
-    tabs.set_title(2, "Export")
+    tabs.set_title(2, "TWI")
+    tabs.set_title(3, "Stats")
+    tabs.set_title(4, "Export")
 
     toolbar_footer = widgets.VBox(children=[title_html, tabs])
 
