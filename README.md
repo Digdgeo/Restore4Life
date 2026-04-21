@@ -1,37 +1,37 @@
 # Restore4Life — Danube Wetlands HydroApp
 
-Widget interactivo para el análisis del hidroperiodo en humedales de la cuenca del Danubio, apoyado en [ndvi2gif](https://github.com/Digdgeo/Ndvi2Gif) y ejecutado sobre Google Earth Engine.
+Interactive widget for hydroperiod analysis of Danube basin wetlands, powered by [ndvi2gif](https://github.com/Digdgeo/Ndvi2Gif) and running on Google Earth Engine.
 
-## Qué hace
+## What it does
 
-Panel plegable en el mapa con 5 pestañas:
+A collapsible panel on the map with 5 tabs:
 
-- **Hydroperiod** — cálculo de ciclos hidrológicos (S2, Landsat, MODIS) con índices de agua configurables y umbral ajustable.
-- **Anomalies** — anomalías respecto a la media del periodo o al histórico completo.
-- **TWI** — Topographic Wetness Index (MERIT Hydro o híbrido NASADEM + MERIT).
-- **Stats** — estadísticas zonales por punto o polígono sobre cualquier producto computado.
-- **Export** — exportación de resultados a Google Drive.
+- **Hydroperiod** — compute hydrological cycles (S2, Landsat, MODIS) with configurable water indices and threshold.
+- **Anomalies** — anomalies relative to the period mean or the full historical archive.
+- **TWI** — Topographic Wetness Index (MERIT Hydro or a hybrid NASADEM + MERIT setup).
+- **Stats** — zonal statistics over points or polygons for any computed product.
+- **Export** — export results to Google Drive.
 
-Selección de ROI por dropdown (humedales del Danubio o sitios eLTER), subida de shapefile/GeoJSON/ZIP, o dibujo directo sobre el mapa.
+ROI selection via dropdown (Danube wetlands or eLTER sites), shapefile/GeoJSON/ZIP upload, or on-map drawing.
 
-Ver [`FEATURES.md`](FEATURES.md) para el desglose completo.
+See [`FEATURES.md`](FEATURES.md) for the full breakdown.
 
-## Instalación
+## Installation
 
 ```bash
 pip install ndvi2gif geemap ipyevents geopandas
 ```
 
-## Datos
+## Data
 
-Los siguientes archivos deben estar en la raíz del repo (ya incluidos):
+The following files must be present at the repo root (already included):
 
-- `DRBD_2021.shp` (+ auxiliares) — cuenca del Danubio
-- `humedales_danubio.shp` (+ auxiliares) — humedales a analizar
-- `elter_danube.geojson` — sitios eLTER en la cuenca (opcional; regenerar con `scripts/build_elter_danube.py`)
-- `logo.png` — logo del widget
+- `DRBD_2021.shp` (+ sidecars) — Danube basin boundary
+- `humedales_danubio.shp` (+ sidecars) — wetlands to analyse
+- `elter_danube.geojson` — eLTER sites within the basin (optional; regenerate with `scripts/build_elter_danube.py`)
+- `logo.png` — widget logo
 
-## Uso
+## Usage
 
 ```python
 import ee
@@ -45,4 +45,4 @@ HydroperiodApp(Map)
 Map
 ```
 
-Ver `notebooks/demo.ipynb` para un walkthrough completo.
+See `notebooks/demo.ipynb` for a full walkthrough.
