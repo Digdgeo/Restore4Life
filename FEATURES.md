@@ -4,6 +4,8 @@ Interactive `leafmap`/`geemap` widget for hydroperiod analysis of Danube basin w
 
 Entry point: `restore4life.HydroperiodApp(Map)` — injects a collapsible panel (top-right corner of the map) with 5 tabs.
 
+![Overview of the HydroApp panel on the Danube basin map](imgs/Overview.png)
+
 ---
 
 ## 1. Base map and context layers
@@ -56,6 +58,8 @@ Buttons:
 - **Show** — adds the selected band of the selected year to the map, using a band-specific palette. For `irt`, it computes `compute_irt_image()` on demand and caches the result.
 - **Reset** — clears state, computed layers, ROI, drawings, and dropdowns.
 
+![Hydroperiod layer over the Braila Islands wetland](imgs/BrailaIslandsExmapleHydroperiod.png)
+
 ---
 
 ## 4. **Anomalies** tab
@@ -69,6 +73,8 @@ Requires a prior *Compute* run in the Hydroperiod tab.
 - **Show mean** — adds the reference mean to the map (palette `mean_hydroperiod`).
 - **Show anomaly** — adds the anomaly for the selected year (diverging red→green palette, ±180 days range).
 
+![Anomaly layer relative to the selected reference period](imgs/AnomaliesExmaple.png)
+
 ---
 
 ## 5. **TWI** tab (Topographic Wetness Index)
@@ -81,6 +87,8 @@ TWI = ln(a / tan β), where *a* = upstream accumulation area per unit contour le
 - **Compute TWI** — computes over the current ROI.
 - **Show** — adds to the map with a blue palette (range 2–20).
 - **Export to Drive** — exports the current TWI as a GeoTIFF. Configurable scale (30, 60, 90, 250, 500 m).
+
+![TWI layer computed on a wetland ROI](imgs/TWIExample.png)
 
 ---
 
@@ -105,6 +113,8 @@ Buttons:
 - **Compute stats** — runs `reduceRegions` and renders the resulting table in the panel (pandas DataFrame). Warns when the collection has >1000 features.
 - **Save CSV** — writes `stats_YYYYMMDD_HHMMSS.csv` to the notebook's cwd.
 - **Export to Drive** — server-side export via `ee.batch.Export.table.toDrive` (recommended for large datasets).
+
+![Stats tab with a per-feature results table](imgs/stats.png)
 
 ---
 
