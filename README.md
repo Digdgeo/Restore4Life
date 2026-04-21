@@ -2,6 +2,8 @@
 
 Interactive widget for hydroperiod analysis of Danube basin wetlands, powered by [ndvi2gif](https://github.com/Digdgeo/Ndvi2Gif) and running on Google Earth Engine.
 
+![HydroApp overview](imgs/Overview.png)
+
 ## What it does
 
 A collapsible panel on the map with 5 tabs:
