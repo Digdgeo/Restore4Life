@@ -215,6 +215,7 @@ def HydroperiodApp(
     m=None,
     basin_shp=None,
     wetlands_shp=None,
+    elter_geojson=None,
     wetland_name_col=None,
 ):
     """Interactive hydroperiod analysis widget for Danube basin wetlands.
@@ -227,6 +228,10 @@ def HydroperiodApp(
         Danube basin shapefile. Defaults to ``DRBD_2021.shp`` in the repo root.
     wetlands_shp : str or Path, optional
         Wetlands shapefile. Defaults to ``humedales_danubio.shp`` in the repo root.
+    elter_geojson : str or Path, optional
+        Pre-computed eLTER sites within the Danube basin. Defaults to
+        ``elter_danube.geojson`` in the repo root. Regenerate via
+        ``scripts/build_elter_danube.py``.
     wetland_name_col : str, optional
         Column in *wetlands_shp* to use as display label. Auto-detected if None.
     """
@@ -236,9 +241,17 @@ def HydroperiodApp(
     # ------------------------------------------------------------------ #
     basin_path    = Path(basin_shp)    if basin_shp    else DATA_DIR / "DRBD_2021.shp"
     wetlands_path = Path(wetlands_shp) if wetlands_shp else DATA_DIR / "humedales_danubio.shp"
+    elter_path    = Path(elter_geojson) if elter_geojson else DATA_DIR / "elter_danube.geojson"
 
     basin_gdf    = gpd.read_file(basin_path).to_crs(4326)
     wetlands_gdf = gpd.read_file(wetlands_path).to_crs(4326)
+
+    if elter_path.exists():
+        elter_gdf = gpd.read_file(elter_path).to_crs(4326)
+        elter_names = sorted(elter_gdf["name"].astype(str).tolist())
+    else:
+        elter_gdf = None
+        elter_names = []
 
     if wetland_name_col is None:
         wetland_name_col = _detect_name_col(wetlands_gdf)
@@ -272,6 +285,13 @@ def HydroperiodApp(
             layer_name="Wetlands",
             style={"color": "#00BFFF", "fillColor": "#00BFFF", "fillOpacity": 0.15, "weight": 2},
         )
+        if elter_gdf is not None and not elter_gdf.empty:
+            m.add_gdf(
+                elter_gdf,
+                layer_name="eLTER sites (Danube)",
+                style={"color": "#2ecc71", "fillColor": "#2ecc71",
+                       "fillOpacity": 0.10, "weight": 2},
+            )
 
         # Centre on basin
         m.fit_bounds([[miny, minx], [maxy, maxx]])
@@ -336,6 +356,16 @@ def HydroperiodApp(
         description="Wetland:",
         layout=widgets.Layout(width=W, padding=PAD),
         style=STYLE,
+    )
+
+    elter_placeholder = "— select eLTER site —"
+    elter_dd = widgets.Dropdown(
+        options=[elter_placeholder] + elter_names,
+        value=elter_placeholder,
+        description="eLTER site:",
+        layout=widgets.Layout(width=W, padding=PAD),
+        style=STYLE,
+        disabled=not elter_names,
     )
 
     # ------------------------------------------------------------------ #
@@ -681,6 +711,8 @@ def HydroperiodApp(
             _st["custom_roi"] = False
             roi_lbl.value     = ""
             draw_btn.value    = False
+            if elter_dd.value != elter_placeholder:
+                elter_dd.value = elter_placeholder
             if m is not None:
                 m.centerObject(_st["roi"], 11)
         else:
@@ -688,6 +720,25 @@ def HydroperiodApp(
                 _st["roi"] = None
 
     wetland_dd.observe(_wetland_change, "value")
+
+    def _elter_change(change):
+        val = change["new"]
+        if val and val != elter_placeholder and elter_gdf is not None:
+            row = elter_gdf[elter_gdf["name"].astype(str) == val].iloc[0]
+            single = gpd.GeoDataFrame([row], crs=elter_gdf.crs)
+            _st["roi"]        = _gdf_to_ee(single).geometry()
+            _st["custom_roi"] = False
+            roi_lbl.value     = ""
+            draw_btn.value    = False
+            if wetland_dd.value != "— select wetland —":
+                wetland_dd.value = "— select wetland —"
+            if m is not None:
+                m.centerObject(_st["roi"], 11)
+        else:
+            if not _st["custom_roi"] and wetland_dd.value == "— select wetland —":
+                _st["roi"] = None
+
+    elter_dd.observe(_elter_change, "value")
 
     def _handle_upload(change):
         uploaded = change["new"]
@@ -699,6 +750,7 @@ def HydroperiodApp(
             _st["custom_roi"] = True
             roi_lbl.value     = f"ROI: {fname} ({len(gdf)} feature(s))"
             wetland_dd.value  = "— select wetland —"
+            elter_dd.value    = elter_placeholder
             draw_btn.value    = False
             if m is not None:
                 m.add_gdf(
@@ -723,6 +775,7 @@ def HydroperiodApp(
                 _st["custom_roi"] = True
                 roi_lbl.value     = f"ROI: drawn {geom['type']}"
                 wetland_dd.value  = "— select wetland —"
+                elter_dd.value    = elter_placeholder
                 draw_btn.value    = False
 
         draw_control.on_draw(_on_draw)
@@ -742,6 +795,7 @@ def HydroperiodApp(
         roi_lbl.value     = ""
         draw_btn.value    = False
         wetland_dd.value  = "— select wetland —"
+        elter_dd.value    = elter_placeholder
         if draw_control is not None:
             draw_control.clear()
 
@@ -806,6 +860,13 @@ def HydroperiodApp(
 
     run_btn.on_click(_run_clicked)
 
+    def _current_site_label():
+        if elter_dd.value and elter_dd.value != elter_placeholder:
+            return elter_dd.value
+        if wetland_dd.value and wetland_dd.value != "— select wetland —":
+            return wetland_dd.value
+        return "custom"
+
     def _show_clicked(b):
         with output_w:
             output_w.clear_output()
@@ -820,6 +881,7 @@ def HydroperiodApp(
                 return
 
             band = band_dd.value
+            site = _current_site_label()
 
             if band == "irt":
                 if _st["irt_img"] is None:
@@ -831,11 +893,11 @@ def HydroperiodApp(
                         print(f"Error: {exc}")
                         return
                 img        = _st["irt_img"]
-                layer_name = f"IRT — {wetland_dd.value}"
+                layer_name = f"IRT — {site}"
             else:
                 yr         = _st["year_map"][yr_label]
                 img        = _st["cycles"][yr].select(band)
-                layer_name = f"{band} {yr_label} — {wetland_dd.value}"
+                layer_name = f"{band} {yr_label} — {site}"
 
             vis = _VIS.get(band, {"min": 0, "max": 365})
             if m is not None:
@@ -877,7 +939,7 @@ def HydroperiodApp(
                 print("Compute anomalies first.")
                 return
             img        = _st["anomalies"]["mean"]
-            layer_name = f"Mean hydroperiod ({anom_ref_dd.value}) — {wetland_dd.value}"
+            layer_name = f"Mean hydroperiod ({anom_ref_dd.value}) — {_current_site_label()}"
             if m is not None:
                 m.addLayer(img, _VIS["mean_hydroperiod"], layer_name)
                 print(f"Layer added: '{layer_name}'")
@@ -896,7 +958,7 @@ def HydroperiodApp(
                 return
             yr         = _st["year_map"][yr_label]
             img        = _st["anomalies"]["anomalies"][yr]
-            layer_name = f"Anomaly {yr_label} ({anom_ref_dd.value}) — {wetland_dd.value}"
+            layer_name = f"Anomaly {yr_label} ({anom_ref_dd.value}) — {_current_site_label()}"
             if m is not None:
                 m.addLayer(img, _VIS["anomaly"], layer_name)
                 print(f"Layer added: '{layer_name}'")
@@ -908,9 +970,7 @@ def HydroperiodApp(
     def _twi_roi_label():
         if _st["custom_roi"]:
             return roi_lbl.value.replace("ROI: ", "").split(" (")[0] or "custom"
-        if wetland_dd.value and wetland_dd.value != "— select wetland —":
-            return wetland_dd.value
-        return "custom"
+        return _current_site_label()
 
     def _twi_run_clicked(b):
         with twi_output_w:
@@ -1159,7 +1219,7 @@ def HydroperiodApp(
                 return
             folder     = exp_folder_w.value.strip() or "restore4life_hydroperiod"
             scale      = exp_scale_w.value
-            site_label = wetland_dd.value.replace(" ", "_").replace("/", "-")
+            site_label = _current_site_label().replace(" ", "_").replace("/", "-")
             for yr, img in _st["cycles"].items():
                 desc = f"hydroperiod_{site_label}_{yr}_{yr + 1}"
                 _st["ha"].export_to_drive(image=img, folder=folder,
@@ -1187,6 +1247,7 @@ def HydroperiodApp(
         roi_lbl.value        = ""
         draw_btn.value       = False
         wetland_dd.value     = "— select wetland —"
+        elter_dd.value       = elter_placeholder
         if draw_control is not None:
             draw_control.clear()
 
@@ -1199,6 +1260,7 @@ def HydroperiodApp(
     # Tab 0 — Hydroperiod
     hydro_tab = widgets.VBox([
         wetland_dd,
+        elter_dd,
         roi_section_html,
         widgets.HBox([upload_w, draw_btn, clear_roi_btn]),
         roi_lbl,
